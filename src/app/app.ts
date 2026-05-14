@@ -13,6 +13,7 @@ import {
 } from '@angular/core';
 import { SupabaseService } from './supabase.service';
 import { OllamaService } from './ollama.service';
+import { BrowserCaptionService } from './browser-caption.service';
 import { buildResultsZip, type ZipLevel } from './zip-export';
 
 interface JobResult {
@@ -444,11 +445,16 @@ interface ProcessingJob {
                  </div>
 
                  <div class="space-y-3">
-                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Object naming (Ollama)</h3>
-                    <label class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a] cursor-pointer">
-                       <span class="text-[9px] uppercase font-bold tracking-widest">Use Ollama vision</span>
-                       <input type="checkbox" [checked]="useOllamaNaming()" (change)="setUseOllamaNaming($any($event.target).checked)" class="accent-orange-500">
-                    </label>
+                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Object naming</h3>
+                    <select [value]="objectNamingMode()" (change)="setObjectNamingMode($any($event.target).value)" class="w-full bg-[#0a0a0a] text-white border border-[#333333] text-[9px] uppercase px-2 py-2 outline-none">
+                      <option value="gemini">Gemini (cloud API)</option>
+                      <option value="browser">In-browser model (Transformers.js, no Ollama)</option>
+                      <option value="ollama">Ollama vision (local server)</option>
+                    </select>
+                    <p class="text-[8px] opacity-40 font-mono leading-relaxed">
+                      <span class="text-orange-500/80">Browser</span> loads Transformers.js from <span class="text-orange-500/80">esm.sh</span> on first use (needs network + allow <span class="text-orange-500/80">connect-src</span> to esm.sh and Hugging Face model hosts), then caches weights in the browser. <span class="text-orange-500/80">Ollama</span> uses your machine’s Ollama HTTP API (see below when selected).
+                    </p>
+                    @if (objectNamingMode() === 'ollama') {
                     <div class="block text-[8px] uppercase opacity-40 font-bold tracking-widest">Base URL</div>
                     <input id="ollama_base" type="text" [value]="ollamaBaseUrl()" (input)="setOllamaBaseUrl($any($event.target).value)" class="w-full bg-black text-white border border-[#333333] px-2 py-2 text-[10px] font-mono" placeholder="/api/ollama">
                     @if (deployOllamaBlocked()) {
@@ -461,6 +467,7 @@ interface ProcessingJob {
                     <p class="text-[8px] opacity-40 font-mono leading-relaxed">
                       Dev: run Ollama locally and use <span class="text-orange-500/80">ng serve</span> with proxy so requests stay same-origin (<span class="text-orange-500/80">/api/ollama</span> → 127.0.0.1:11434). A deployed Workers site cannot reach your PC without a tunnel (e.g. Cloudflare Tunnel, ngrok), HTTPS, and Ollama CORS (<span class="text-orange-500/80">OLLAMA_ORIGINS</span>) or a server-side proxy.
                     </p>
+                    }
                  </div>
 
                  <div class="space-y-3">
@@ -503,6 +510,7 @@ export class App implements OnInit {
   private sanitizer = inject(DomSanitizer);
   private supabase = inject(SupabaseService);
   private ollama = inject(OllamaService);
+  private browserCaption = inject(BrowserCaptionService);
   private platformId = inject(PLATFORM_ID);
   
   // State
@@ -524,7 +532,7 @@ export class App implements OnInit {
   showSettings = signal<boolean>(false);
   dbStatus = signal<string>('Connecting to DB...');
 
-  useOllamaNaming = signal<boolean>(false);
+  objectNamingMode = signal<'gemini' | 'browser' | 'ollama'>('gemini');
   ollamaBaseUrl = signal<string>('/api/ollama');
   ollamaModel = signal<string>('llava');
   allowCloudFallback = signal<boolean>(false);
@@ -576,7 +584,8 @@ export class App implements OnInit {
   }
 
   private readonly ls = {
-    ollama: 'pipeline_use_ollama_naming',
+    namingMode: 'pipeline_object_naming_mode',
+    legacyOllama: 'pipeline_use_ollama_naming',
     ollamaBase: 'pipeline_ollama_base',
     ollamaModel: 'pipeline_ollama_model',
     cloudFb: 'pipeline_allow_cloud_fallback',
@@ -587,8 +596,11 @@ export class App implements OnInit {
 
   loadStoredSettings(): void {
     try {
-      if (localStorage.getItem(this.ls.ollama) === '1') {
-        this.useOllamaNaming.set(true);
+      const nm = localStorage.getItem(this.ls.namingMode);
+      if (nm === 'gemini' || nm === 'browser' || nm === 'ollama') {
+        this.objectNamingMode.set(nm);
+      } else if (localStorage.getItem(this.ls.legacyOllama) === '1') {
+        this.objectNamingMode.set('ollama');
       }
       const b = localStorage.getItem(this.ls.ollamaBase);
       if (b) {
@@ -619,7 +631,7 @@ export class App implements OnInit {
 
   saveStoredSettings(): void {
     try {
-      localStorage.setItem(this.ls.ollama, this.useOllamaNaming() ? '1' : '0');
+      localStorage.setItem(this.ls.namingMode, this.objectNamingMode());
       localStorage.setItem(this.ls.ollamaBase, this.ollamaBaseUrl());
       localStorage.setItem(this.ls.ollamaModel, this.ollamaModel());
       localStorage.setItem(this.ls.cloudFb, this.allowCloudFallback() ? '1' : '0');
@@ -636,9 +648,11 @@ export class App implements OnInit {
     this.showSettings.set(false);
   }
 
-  setUseOllamaNaming(v: boolean): void {
-    this.useOllamaNaming.set(v);
-    this.saveStoredSettings();
+  setObjectNamingMode(v: string): void {
+    if (v === 'gemini' || v === 'browser' || v === 'ollama') {
+      this.objectNamingMode.set(v);
+      this.saveStoredSettings();
+    }
   }
 
   setOllamaBaseUrl(v: string): void {
@@ -749,7 +763,21 @@ export class App implements OnInit {
     if (manual) {
       return manual;
     }
-    if (this.useOllamaNaming()) {
+    if (this.objectNamingMode() === 'browser') {
+      this.currentPrompt.set('In-browser caption model…');
+      try {
+        const fromBrowser = await this.browserCaption.captionFromBase64(
+          base64Data,
+          mimeType,
+          (msg) => this.currentPrompt.set(msg),
+        );
+        if (fromBrowser) {
+          return fromBrowser;
+        }
+      } catch (err) {
+        console.error('Browser caption failed', err);
+      }
+    } else if (this.objectNamingMode() === 'ollama') {
       const base = this.ollamaBaseUrl().trim();
       const relativeBlocked = this.deployOllamaBlocked() && (base === '' || base.startsWith('/'));
       if (!relativeBlocked) {
@@ -764,7 +792,12 @@ export class App implements OnInit {
         }
       }
     }
-    this.currentPrompt.set('Analyzing image via Gemini Cluster...');
+
+    if (this.objectNamingMode() !== 'gemini') {
+      this.currentPrompt.set('Naming fallback: Gemini…');
+    } else {
+      this.currentPrompt.set('Analyzing image via Gemini Cluster...');
+    }
     try {
       const idenResponse = await ai.models.generateContent({
         model: 'gemini-1.5-flash',
