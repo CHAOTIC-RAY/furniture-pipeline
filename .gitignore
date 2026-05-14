@@ -50,3 +50,7 @@ Thumbs.db
 .wrangler
 .dev.vars*
 !.dev.vars.example
+
+# IMG.LY background-removal runtime assets (npm run fetch:imgly-assets)
+/public/background-removal/**
+!/public/background-removal/.gitkeep

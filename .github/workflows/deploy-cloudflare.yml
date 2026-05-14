@@ -1,0 +1,36 @@
+# Manual Cloudflare Workers deploy (static assets from Angular browser build).
+# Secrets: CLOUDFLARE_API_TOKEN — create with Workers Scripts:Edit (or narrower Workers scope per account policy).
+#         CLOUDFLARE_ACCOUNT_ID — Cloudflare dashboard account id.
+#
+# Deployed browser apps cannot call Ollama on your PC without HTTPS + CORS (OLLAMA_ORIGINS) or a tunnel; use ng serve + proxy for same-machine dev.
+name: Deploy Cloudflare
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Cache IMG.LY background-removal assets
+        uses: actions/cache@v4
+        with:
+          path: public/background-removal
+          key: imgly-br-${{ hashFiles('package-lock.json', 'scripts/fetch-imgly-assets.mjs') }}
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy

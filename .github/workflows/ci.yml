@@ -1,0 +1,35 @@
+# CI: lint and production build on Linux (use when local npm fails).
+# IMG.LY assets are large; cache public/background-removal between runs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Cache IMG.LY background-removal assets
+        uses: actions/cache@v4
+        with:
+          path: public/background-removal
+          key: imgly-br-${{ hashFiles('package-lock.json', 'scripts/fetch-imgly-assets.mjs') }}
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run build
+
+      - name: Print browser bundle layout
+        run: find dist -name index.html -print && ls -la dist/app/browser | head -40

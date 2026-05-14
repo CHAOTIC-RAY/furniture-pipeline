@@ -11,11 +11,15 @@ import { CommonModule } from '@angular/common';
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 import { GoogleGenAI } from '@google/genai';
 import { SupabaseService } from './supabase.service';
+import { OllamaService } from './ollama.service';
+import { buildResultsZip } from './zip-export';
 
 interface JobResult {
   originalName: string;
   cleanName: string;
   safeUrl: SafeUrl;
+  /** Raw `data:` URL for client-side ZIP export. */
+  dataUrl: string;
   dimensions: string; // Formatting rules: W x D x H in centimeters
 }
 
@@ -121,6 +125,11 @@ interface ProcessingJob {
                   </label>
                 </div>
               }
+              @if (localPipelineBlocked()) {
+                <p class="text-[9px] font-mono text-orange-500 border border-orange-900/50 bg-orange-950/30 p-3 leading-relaxed mt-4">
+                  Local WebGPU engine only supports <span class="font-bold">Bulk Background Removal</span>. Choose that module or switch to Cloud. Cloud fallback for failed local runs is optional in settings.
+                </p>
+              }
             </div>
 
             <!-- Dropzone -->
@@ -169,7 +178,7 @@ interface ProcessingJob {
 
                   <button 
                     (click)="startUpload()"
-                    [disabled]="isUploading()"
+                    [disabled]="isUploading() || localPipelineBlocked()"
                     class="w-full bg-[#E5E5E5] text-[#0a0a0a] py-4 text-[11px] uppercase tracking-[0.2em] font-bold hover:bg-orange-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                     @if (isUploading()) {
                       AI CLUSTER ACTIVE...
@@ -236,8 +245,22 @@ interface ProcessingJob {
                   <span class="border-b-2 border-white pb-1">Live Grid</span>
                   <span class="opacity-30 pb-1 cursor-pointer hover:opacity-100 transition-opacity">Output Log</span>
                 </div>
-                <div>Rendering Sequence: {{ results().length }}/{{ activeJob()?.total || '-' }}</div>
+                <div class="flex flex-col items-end gap-2">
+                  <div>Rendering Sequence: {{ results().length }}/{{ activeJob()?.total || '-' }}</div>
+                  @if (results().length > 0 && activeJob()?.status === 'completed') {
+                    <button
+                      type="button"
+                      (click)="downloadAllZip()"
+                      [disabled]="isBuildingZip()"
+                      class="border border-orange-600 text-orange-500 px-3 py-1.5 text-[9px] font-bold uppercase tracking-widest hover:bg-orange-500/10 disabled:opacity-40 disabled:cursor-not-allowed">
+                      {{ isBuildingZip() ? 'Building ZIP…' : 'Download all (ZIP)' }}
+                    </button>
+                  }
+                </div>
               </div>
+              @if (zipNotice()) {
+                <p class="text-[9px] font-mono text-orange-400 mb-4 max-w-xl leading-relaxed">{{ zipNotice() }}</p>
+              }
               
               @if (!activeJob() && results().length === 0) {
                 <div class="flex-1 border border-dashed border-[#333333] bg-[#111111] flex items-center justify-center min-h-[300px]">
@@ -363,7 +386,7 @@ interface ProcessingJob {
            <div class="w-full max-w-md bg-[#111] border border-[#333333] shadow-2xl flex flex-col">
               <div class="p-6 border-b border-[#333333] flex justify-between items-center">
                  <h2 class="text-xs uppercase font-bold tracking-[0.2em]">Global Parameters</h2>
-                 <button (click)='showSettings.set(false)' class="text-white opacity-40 hover:opacity-100 uppercase text-[9px] font-bold">Close</button>
+                 <button (click)="closeSettings()" class="text-white opacity-40 hover:opacity-100 uppercase text-[9px] font-bold">Close</button>
               </div>
               
               <div class="p-8 space-y-8">
@@ -385,6 +408,40 @@ interface ProcessingJob {
                           <option value="white">Solid White</option>
                        </select>
                     </div>
+                 </div>
+
+                 <div class="space-y-3">
+                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Local WASM model</h3>
+                    <p class="text-[8px] opacity-40 font-mono leading-relaxed">Maps to @imgly models: Fast = isnet_quint8, Balanced = isnet_fp16, Quality = isnet. Assets load from <span class="text-orange-500/80">/background-removal/</span> after <span class="text-orange-500/80">npm run build</span> (see scripts/fetch-imgly-assets.mjs).</p>
+                    <select [value]="localModelTier()" (change)="setLocalModelTier($any($event.target).value)" class="w-full bg-[#0a0a0a] text-white border border-[#333333] text-[9px] uppercase px-2 py-2 outline-none">
+                      <option value="fast">Fast (smaller model)</option>
+                      <option value="balanced">Balanced (default)</option>
+                      <option value="quality">Quality (larger model)</option>
+                    </select>
+                 </div>
+
+                 <div class="space-y-3">
+                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Object naming (Ollama)</h3>
+                    <label class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a] cursor-pointer">
+                       <span class="text-[9px] uppercase font-bold tracking-widest">Use Ollama vision</span>
+                       <input type="checkbox" [checked]="useOllamaNaming()" (change)="setUseOllamaNaming($any($event.target).checked)" class="accent-orange-500">
+                    </label>
+                    <div class="block text-[8px] uppercase opacity-40 font-bold tracking-widest">Base URL</div>
+                    <input id="ollama_base" type="text" [value]="ollamaBaseUrl()" (input)="setOllamaBaseUrl($any($event.target).value)" class="w-full bg-black text-white border border-[#333333] px-2 py-2 text-[10px] font-mono" placeholder="/api/ollama">
+                    <div class="block text-[8px] uppercase opacity-40 font-bold tracking-widest mt-2">Model</div>
+                    <input id="ollama_model" type="text" [value]="ollamaModel()" (input)="setOllamaModel($any($event.target).value)" class="w-full bg-black text-white border border-[#333333] px-2 py-2 text-[10px] font-mono" placeholder="llava">
+                    <p class="text-[8px] opacity-40 font-mono leading-relaxed">
+                      Dev: run Ollama locally and use <span class="text-orange-500/80">ng serve</span> with proxy so requests stay same-origin (<span class="text-orange-500/80">/api/ollama</span> → 127.0.0.1:11434). A deployed Workers site cannot reach your PC without a tunnel (e.g. Cloudflare Tunnel, ngrok), HTTPS, and Ollama CORS (<span class="text-orange-500/80">OLLAMA_ORIGINS</span>) or a server-side proxy.
+                    </p>
+                 </div>
+
+                 <div class="space-y-3">
+                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Local engine fallback</h3>
+                    <label class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a] cursor-pointer">
+                       <span class="text-[9px] uppercase font-bold tracking-widest">Allow cloud fallback</span>
+                       <input type="checkbox" [checked]="allowCloudFallback()" (change)="setAllowCloudFallback($any($event.target).checked)" class="accent-orange-500">
+                    </label>
+                    <p class="text-[8px] opacity-40 font-mono leading-relaxed">When off, a failed local background removal does not send the image to Gemini.</p>
                  </div>
 
                  <div class="pt-4 border-t border-[#333333] opacity-20 text-center font-mono text-[8px]">
@@ -417,6 +474,7 @@ interface ProcessingJob {
 export class App implements OnInit {
   private sanitizer = inject(DomSanitizer);
   private supabase = inject(SupabaseService);
+  private ollama = inject(OllamaService);
   
   // State
   modes = [
@@ -436,6 +494,18 @@ export class App implements OnInit {
   cleanObjects = signal<boolean>(false);
   showSettings = signal<boolean>(false);
   dbStatus = signal<string>('Connecting to DB...');
+
+  useOllamaNaming = signal<boolean>(false);
+  ollamaBaseUrl = signal<string>('/api/ollama');
+  ollamaModel = signal<string>('llava');
+  allowCloudFallback = signal<boolean>(false);
+  localModelTier = signal<'fast' | 'balanced' | 'quality'>('balanced');
+  isBuildingZip = signal<boolean>(false);
+  zipNotice = signal<string | null>(null);
+
+  localPipelineBlocked = computed(
+    () => this.engine() === 'local' && this.processType() !== 'bg_removal',
+  );
   
   activeJob = signal<ProcessingJob | null>(null);
   results = computed(() => this.activeJob()?.results || []);
@@ -457,8 +527,167 @@ export class App implements OnInit {
   });
 
   async ngOnInit() {
-    // Simply indicate the Supabase client is initialized since the user hasn't created any specific tables yet.
     this.dbStatus.set('DB Client Initialized');
+    this.loadStoredSettings();
+  }
+
+  private readonly ls = {
+    ollama: 'pipeline_use_ollama_naming',
+    ollamaBase: 'pipeline_ollama_base',
+    ollamaModel: 'pipeline_ollama_model',
+    cloudFb: 'pipeline_allow_cloud_fallback',
+    tier: 'pipeline_local_model_tier',
+  } as const;
+
+  loadStoredSettings(): void {
+    try {
+      if (localStorage.getItem(this.ls.ollama) === '1') {
+        this.useOllamaNaming.set(true);
+      }
+      const b = localStorage.getItem(this.ls.ollamaBase);
+      if (b) {
+        this.ollamaBaseUrl.set(b);
+      }
+      const m = localStorage.getItem(this.ls.ollamaModel);
+      if (m) {
+        this.ollamaModel.set(m);
+      }
+      if (localStorage.getItem(this.ls.cloudFb) === '1') {
+        this.allowCloudFallback.set(true);
+      }
+      const t = localStorage.getItem(this.ls.tier);
+      if (t === 'fast' || t === 'balanced' || t === 'quality') {
+        this.localModelTier.set(t);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  saveStoredSettings(): void {
+    try {
+      localStorage.setItem(this.ls.ollama, this.useOllamaNaming() ? '1' : '0');
+      localStorage.setItem(this.ls.ollamaBase, this.ollamaBaseUrl());
+      localStorage.setItem(this.ls.ollamaModel, this.ollamaModel());
+      localStorage.setItem(this.ls.cloudFb, this.allowCloudFallback() ? '1' : '0');
+      localStorage.setItem(this.ls.tier, this.localModelTier());
+    } catch {
+      /* ignore */
+    }
+  }
+
+  closeSettings(): void {
+    this.saveStoredSettings();
+    this.showSettings.set(false);
+  }
+
+  setUseOllamaNaming(v: boolean): void {
+    this.useOllamaNaming.set(v);
+    this.saveStoredSettings();
+  }
+
+  setOllamaBaseUrl(v: string): void {
+    this.ollamaBaseUrl.set(v);
+    this.saveStoredSettings();
+  }
+
+  setOllamaModel(v: string): void {
+    this.ollamaModel.set(v);
+    this.saveStoredSettings();
+  }
+
+  setAllowCloudFallback(v: boolean): void {
+    this.allowCloudFallback.set(v);
+    this.saveStoredSettings();
+  }
+
+  setLocalModelTier(v: string): void {
+    if (v === 'fast' || v === 'balanced' || v === 'quality') {
+      this.localModelTier.set(v);
+      this.saveStoredSettings();
+    }
+  }
+
+  private imglyModelId(): 'isnet' | 'isnet_fp16' | 'isnet_quint8' {
+    const t = this.localModelTier();
+    if (t === 'fast') {
+      return 'isnet_quint8';
+    }
+    if (t === 'quality') {
+      return 'isnet';
+    }
+    return 'isnet_fp16';
+  }
+
+  private async resolveObjectLabel(
+    p: UploadedFile,
+    base64Data: string,
+    mimeType: string,
+    ai: GoogleGenAI,
+  ): Promise<string> {
+    const manual = p.objectName?.trim();
+    if (manual) {
+      return manual;
+    }
+    if (this.useOllamaNaming()) {
+      this.currentPrompt.set('Ollama vision naming…');
+      const fromOllama = await this.ollama.nameMainObject(
+        base64Data,
+        this.ollamaBaseUrl(),
+        this.ollamaModel(),
+      );
+      if (fromOllama) {
+        return fromOllama;
+      }
+    }
+    this.currentPrompt.set('Analyzing image via Gemini Cluster...');
+    try {
+      const idenResponse = await ai.models.generateContent({
+        model: 'gemini-1.5-flash',
+        contents: {
+          parts: [
+            { inlineData: { data: base64Data, mimeType: mimeType } },
+            { text: 'Identify the main object in this image. Respond with ONLY the object name in 1-3 words.' },
+          ],
+        },
+      });
+      return idenResponse.text?.trim() || 'object';
+    } catch {
+      return 'object';
+    }
+  }
+
+  async downloadAllZip(): Promise<void> {
+    const job = this.activeJob();
+    if (!job || job.results.length === 0) {
+      return;
+    }
+    this.isBuildingZip.set(true);
+    this.zipNotice.set(null);
+    try {
+      if (job.results.length > 20) {
+        this.zipNotice.set(
+          'Large batch: zipping many high-resolution PNGs can use a lot of memory in the browser. If the tab freezes, download files individually.',
+        );
+      }
+      const bytes = await buildResultsZip(
+        job.results.map((r) => ({ path: r.cleanName, dataUrl: r.dataUrl })),
+      );
+      const blob = new Blob([new Uint8Array(bytes)], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `batch_${job.id}_${new Date().toISOString().slice(0, 10)}.zip`;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      this.zipNotice.set('ZIP build failed. Try fewer or smaller images.');
+    } finally {
+      this.isBuildingZip.set(false);
+    }
   }
 
   // --- Expand Canvas Editor Logic ---
@@ -568,6 +797,10 @@ export class App implements OnInit {
   async startUpload() {
     const previews = this.selectedFiles();
     if (previews.length === 0) return;
+    if (this.localPipelineBlocked()) {
+      this.isUploading.set(false);
+      return;
+    }
 
     this.isUploading.set(true);
 
@@ -599,13 +832,17 @@ export class App implements OnInit {
 
             // --- LOCAL PROCESSING PATH ---
             if (this.engine() === 'local' && mode === 'bg_removal') {
-                this.currentPrompt.set("Invoking Local Neural Network...");
+                this.currentPrompt.set('Invoking Local Neural Network...');
                 try {
                     const { removeBackground } = await import('@imgly/background-removal');
                     const blob = await removeBackground(p.file, {
-                        progress: (step, progress) => {
-                             this.currentPrompt.set(`Local Model: ${step} (${Math.round(progress * 100)}%)`);
-                        }
+                        publicPath: '/background-removal/',
+                        model: this.imglyModelId(),
+                        device: 'gpu',
+                        progress: (key, current, total) => {
+                            const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+                            this.currentPrompt.set(`Local: ${key} (${pct}%)`);
+                        },
                     });
                     const localBase64 = await new Promise<string>((resolve) => {
                         const reader = new FileReader();
@@ -619,31 +856,20 @@ export class App implements OnInit {
                          outputMime = 'image/jpeg';
                     }
                 } catch (localError) {
-                    console.error("Local engine failed, falling back to cloud", localError);
+                    console.error('Local engine failed', localError);
+                    if (!this.allowCloudFallback()) {
+                        throw new Error(
+                            'Local background removal failed. Enable cloud fallback in settings, confirm assets exist at /background-removal/, or switch to Cloud.',
+                        );
+                    }
+                    this.currentPrompt.set('Local failed — cloud fallback…');
                 }
             }
 
             // --- CLOUD PROCESSING PATH (Fallback Cluster) ---
             if (!outputBase64) {
                 await new Promise(r => setTimeout(r, 1000));
-                let detectedObject = p.objectName?.trim();
-                if (!detectedObject) {
-                   this.currentPrompt.set("Analyzing image via Gemini Cluster...");
-                   try {
-                       const idenResponse = await ai.models.generateContent({
-                         model: 'gemini-1.5-flash',
-                         contents: {
-                           parts: [
-                             { inlineData: { data: base64Data, mimeType: mimeType } },
-                             { text: "Identify the main object in this image. Respond with ONLY the object name in 1-3 words." }
-                           ]
-                         }
-                       });
-                       detectedObject = idenResponse.text?.trim() || "object";
-                   } catch {
-                       detectedObject = "object";
-                   }
-                }
+                const detectedObject = await this.resolveObjectLabel(p, base64Data, mimeType, ai);
             
             if (mode === 'bg_removal') {
                  const cleanStr = this.cleanObjects() ? `
@@ -755,6 +981,7 @@ Constraint 2: Eliminate all magenta. The final image should look like a natural 
                   originalName: p.file.name,
                   cleanName: cleanName,
                   safeUrl: this.sanitizer.bypassSecurityTrustUrl(outputUrl),
+                  dataUrl: outputUrl,
                   dimensions: `${mockW} (W) x ${mockD} (D) x ${mockH} (H) cm`
                };
                

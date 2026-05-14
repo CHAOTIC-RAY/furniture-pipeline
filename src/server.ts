@@ -5,12 +5,39 @@ import {
   writeResponseToNodeResponse,
 } from '@angular/ssr/node';
 import express from 'express';
+import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 
 const browserDistFolder = join(import.meta.dirname, '../browser');
 
 const app = express();
 const angularApp = new AngularNodeAppEngine();
+
+/** Dev / Node SSR: same-origin proxy to local Ollama (not used by Workers static deploy). */
+app.use('/api/ollama', (req, res) => {
+  const raw = req.url || '/';
+  const q = raw.includes('?') ? `?${raw.split('?')[1]}` : '';
+  const pathOnly = raw.split('?')[0] || '/';
+  const proxyReq = httpRequest(
+    {
+      hostname: '127.0.0.1',
+      port: 11434,
+      path: pathOnly + q,
+      method: req.method,
+      headers: { ...req.headers, host: '127.0.0.1:11434' },
+    },
+    (upstream) => {
+      res.writeHead(upstream.statusCode ?? 502, upstream.headers);
+      upstream.pipe(res);
+    },
+  );
+  proxyReq.on('error', (err) => {
+    res.statusCode = 502;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: 'Ollama proxy error', detail: String(err) }));
+  });
+  req.pipe(proxyReq);
+});
 
 app.use('/api', express.json());
 
