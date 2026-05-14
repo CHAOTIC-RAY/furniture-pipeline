@@ -1,11 +1,12 @@
-{
-  "/api/ollama": {
+[
+  {
+    "context": ["/api/ollama"],
     "target": "http://127.0.0.1:11434",
     "secure": false,
     "changeOrigin": true,
-    "logLevel": "silent",
+    "logLevel": "warn",
     "pathRewrite": {
       "^/api/ollama": ""
     }
   }
-}
+]

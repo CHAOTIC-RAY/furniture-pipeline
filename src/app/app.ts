@@ -1,3 +1,6 @@
+import { CommonModule, isPlatformBrowser } from '@angular/common';
+import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
+import { GoogleGenAI, Modality } from '@google/genai';
 import {
   ChangeDetectionStrategy,
   Component,
@@ -5,14 +8,12 @@ import {
   computed,
   inject,
   OnInit,
-  HostListener
+  HostListener,
+  PLATFORM_ID,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
-import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
-import { GoogleGenAI } from '@google/genai';
 import { SupabaseService } from './supabase.service';
 import { OllamaService } from './ollama.service';
-import { buildResultsZip } from './zip-export';
+import { buildResultsZip, type ZipLevel } from './zip-export';
 
 interface JobResult {
   originalName: string;
@@ -421,6 +422,28 @@ interface ProcessingJob {
                  </div>
 
                  <div class="space-y-3">
+                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Downloads &amp; offline cache</h3>
+                    <p class="text-[8px] opacity-40 font-mono leading-relaxed">Pre-downloads the @imgly ONNX + WASM pack into the browser cache so local WebGPU runs stay fast and fully offline after the first load.</p>
+                    <label class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a] cursor-pointer">
+                       <span class="text-[9px] uppercase font-bold tracking-widest">Auto-preload on startup</span>
+                       <input type="checkbox" [checked]="autoPreloadImgly()" (change)="setAutoPreloadImgly($any($event.target).checked)" class="accent-orange-500">
+                    </label>
+                    <button type="button" (click)="runImglyPreload()" [disabled]="localPreloadStatus() === 'running'" class="w-full border border-orange-600 text-orange-500 py-2 text-[9px] uppercase font-bold tracking-widest hover:bg-orange-500/10 disabled:opacity-40">
+                      {{ localPreloadStatus() === 'running' ? 'Preloading local models…' : 'Preload / refresh local models now' }}
+                    </button>
+                    @if (localPreloadDetail()) {
+                      <p class="text-[9px] font-mono text-zinc-400 leading-relaxed">{{ localPreloadDetail() }}</p>
+                    }
+                    <div class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a]">
+                       <span class="text-[9px] uppercase font-bold tracking-widest">ZIP batch download</span>
+                       <select [value]="zipLevelPreset()" (change)="setZipLevelPreset($any($event.target).value)" class="bg-black text-white border-none outline-none text-[9px] uppercase font-bold max-w-[140px]">
+                          <option value="faster">Faster (lighter zip)</option>
+                          <option value="smaller">Smaller files (slower)</option>
+                       </select>
+                    </div>
+                 </div>
+
+                 <div class="space-y-3">
                     <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Object naming (Ollama)</h3>
                     <label class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a] cursor-pointer">
                        <span class="text-[9px] uppercase font-bold tracking-widest">Use Ollama vision</span>
@@ -428,6 +451,11 @@ interface ProcessingJob {
                     </label>
                     <div class="block text-[8px] uppercase opacity-40 font-bold tracking-widest">Base URL</div>
                     <input id="ollama_base" type="text" [value]="ollamaBaseUrl()" (input)="setOllamaBaseUrl($any($event.target).value)" class="w-full bg-black text-white border border-[#333333] px-2 py-2 text-[10px] font-mono" placeholder="/api/ollama">
+                    @if (deployOllamaBlocked()) {
+                      <p class="text-[9px] font-mono text-amber-500/90 leading-relaxed border border-amber-900/40 bg-amber-950/20 p-2">
+                        This host is static (e.g. Workers): <span class="font-bold">/api/ollama</span> is not available here (404). Use a full HTTPS tunnel URL to Ollama, or run naming on <span class="font-bold">ng serve</span> with the dev proxy.
+                      </p>
+                    }
                     <div class="block text-[8px] uppercase opacity-40 font-bold tracking-widest mt-2">Model</div>
                     <input id="ollama_model" type="text" [value]="ollamaModel()" (input)="setOllamaModel($any($event.target).value)" class="w-full bg-black text-white border border-[#333333] px-2 py-2 text-[10px] font-mono" placeholder="llava">
                     <p class="text-[8px] opacity-40 font-mono leading-relaxed">
@@ -475,6 +503,7 @@ export class App implements OnInit {
   private sanitizer = inject(DomSanitizer);
   private supabase = inject(SupabaseService);
   private ollama = inject(OllamaService);
+  private platformId = inject(PLATFORM_ID);
   
   // State
   modes = [
@@ -502,10 +531,22 @@ export class App implements OnInit {
   localModelTier = signal<'fast' | 'balanced' | 'quality'>('balanced');
   isBuildingZip = signal<boolean>(false);
   zipNotice = signal<string | null>(null);
+  autoPreloadImgly = signal<boolean>(false);
+  localPreloadStatus = signal<'idle' | 'running' | 'ready' | 'error'>('idle');
+  localPreloadDetail = signal<string>('');
+  zipLevelPreset = signal<'faster' | 'smaller'>('smaller');
 
   localPipelineBlocked = computed(
     () => this.engine() === 'local' && this.processType() !== 'bg_removal',
   );
+
+  deployOllamaBlocked = computed(() => {
+    if (!isPlatformBrowser(this.platformId)) {
+      return false;
+    }
+    const h = window.location.hostname;
+    return h.endsWith('.workers.dev') || h.endsWith('.pages.dev');
+  });
   
   activeJob = signal<ProcessingJob | null>(null);
   results = computed(() => this.activeJob()?.results || []);
@@ -529,6 +570,9 @@ export class App implements OnInit {
   async ngOnInit() {
     this.dbStatus.set('DB Client Initialized');
     this.loadStoredSettings();
+    if (isPlatformBrowser(this.platformId) && this.autoPreloadImgly()) {
+      void this.runImglyPreload({ quiet: true });
+    }
   }
 
   private readonly ls = {
@@ -537,6 +581,8 @@ export class App implements OnInit {
     ollamaModel: 'pipeline_ollama_model',
     cloudFb: 'pipeline_allow_cloud_fallback',
     tier: 'pipeline_local_model_tier',
+    autoPreload: 'pipeline_auto_preload_imgly',
+    zipPreset: 'pipeline_zip_level_preset',
   } as const;
 
   loadStoredSettings(): void {
@@ -559,6 +605,13 @@ export class App implements OnInit {
       if (t === 'fast' || t === 'balanced' || t === 'quality') {
         this.localModelTier.set(t);
       }
+      if (localStorage.getItem(this.ls.autoPreload) === '1') {
+        this.autoPreloadImgly.set(true);
+      }
+      const zp = localStorage.getItem(this.ls.zipPreset);
+      if (zp === 'faster' || zp === 'smaller') {
+        this.zipLevelPreset.set(zp);
+      }
     } catch {
       /* ignore */
     }
@@ -571,6 +624,8 @@ export class App implements OnInit {
       localStorage.setItem(this.ls.ollamaModel, this.ollamaModel());
       localStorage.setItem(this.ls.cloudFb, this.allowCloudFallback() ? '1' : '0');
       localStorage.setItem(this.ls.tier, this.localModelTier());
+      localStorage.setItem(this.ls.autoPreload, this.autoPreloadImgly() ? '1' : '0');
+      localStorage.setItem(this.ls.zipPreset, this.zipLevelPreset());
     } catch {
       /* ignore */
     }
@@ -608,6 +663,71 @@ export class App implements OnInit {
     }
   }
 
+  setAutoPreloadImgly(v: boolean): void {
+    this.autoPreloadImgly.set(v);
+    this.saveStoredSettings();
+  }
+
+  setZipLevelPreset(v: string): void {
+    if (v === 'faster' || v === 'smaller') {
+      this.zipLevelPreset.set(v);
+      this.saveStoredSettings();
+    }
+  }
+
+  private imglyAssetBaseUrl(): string {
+    if (isPlatformBrowser(this.platformId) && typeof window !== 'undefined') {
+      return new URL('/background-removal/', window.location.origin).href;
+    }
+    return '/background-removal/';
+  }
+
+  private zipLevelForExport(): ZipLevel {
+    return this.zipLevelPreset() === 'faster' ? 3 : 9;
+  }
+
+  async runImglyPreload(opts?: { quiet?: boolean }): Promise<void> {
+    if (!isPlatformBrowser(this.platformId)) {
+      return;
+    }
+    const quiet = opts?.quiet === true;
+    if (!quiet) {
+      this.localPreloadStatus.set('running');
+      this.localPreloadDetail.set('Connecting to asset host…');
+    }
+    try {
+      const { preload } = await import('@imgly/background-removal');
+      await preload({
+        publicPath: this.imglyAssetBaseUrl(),
+        model: this.imglyModelId(),
+        device: 'gpu',
+        progress: (key, current, total) => {
+          const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+          if (!quiet) {
+            this.localPreloadDetail.set(`${key} (${pct}%)`);
+          }
+        },
+      });
+      if (quiet) {
+        this.localPreloadStatus.set('idle');
+        this.localPreloadDetail.set('');
+      } else {
+        this.localPreloadStatus.set('ready');
+        this.localPreloadDetail.set('Local pack is cached in this browser.');
+      }
+    } catch (e) {
+      if (quiet) {
+        this.localPreloadStatus.set('idle');
+        this.localPreloadDetail.set('');
+      } else {
+        this.localPreloadStatus.set('error');
+        this.localPreloadDetail.set(
+          `Preload failed: ${(e as Error)?.message || String(e)}. Run a production build with assets, or set SKIP_IMGLY_FETCH=0 and npm run build once.`,
+        );
+      }
+    }
+  }
+
   private imglyModelId(): 'isnet' | 'isnet_fp16' | 'isnet_quint8' {
     const t = this.localModelTier();
     if (t === 'fast') {
@@ -630,14 +750,18 @@ export class App implements OnInit {
       return manual;
     }
     if (this.useOllamaNaming()) {
-      this.currentPrompt.set('Ollama vision naming…');
-      const fromOllama = await this.ollama.nameMainObject(
-        base64Data,
-        this.ollamaBaseUrl(),
-        this.ollamaModel(),
-      );
-      if (fromOllama) {
-        return fromOllama;
+      const base = this.ollamaBaseUrl().trim();
+      const relativeBlocked = this.deployOllamaBlocked() && (base === '' || base.startsWith('/'));
+      if (!relativeBlocked) {
+        this.currentPrompt.set('Ollama vision naming…');
+        const fromOllama = await this.ollama.nameMainObject(
+          base64Data,
+          this.ollamaBaseUrl(),
+          this.ollamaModel(),
+        );
+        if (fromOllama) {
+          return fromOllama;
+        }
       }
     }
     this.currentPrompt.set('Analyzing image via Gemini Cluster...');
@@ -672,6 +796,7 @@ export class App implements OnInit {
       }
       const bytes = await buildResultsZip(
         job.results.map((r) => ({ path: r.cleanName, dataUrl: r.dataUrl })),
+        this.zipLevelForExport(),
       );
       const blob = new Blob([new Uint8Array(bytes)], { type: 'application/zip' });
       const url = URL.createObjectURL(blob);
@@ -828,7 +953,11 @@ export class App implements OnInit {
             let outputMime = null;
             const mimeType = p.file.type || 'image/jpeg';
             let prompt = "";
-            const fallbackModels = ['gemini-2.5-flash-image', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+            const fallbackModels = [
+              'gemini-2.0-flash-preview-image-generation',
+              'gemini-2.5-flash-image-preview',
+              'gemini-2.5-flash-image',
+            ];
 
             // --- LOCAL PROCESSING PATH ---
             if (this.engine() === 'local' && mode === 'bg_removal') {
@@ -836,7 +965,7 @@ export class App implements OnInit {
                 try {
                     const { removeBackground } = await import('@imgly/background-removal');
                     const blob = await removeBackground(p.file, {
-                        publicPath: '/background-removal/',
+                        publicPath: this.imglyAssetBaseUrl(),
                         model: this.imglyModelId(),
                         device: 'gpu',
                         progress: (key, current, total) => {
@@ -933,9 +1062,12 @@ Constraint 2: Eliminate all magenta. The final image should look like a natural 
                               { text: prompt }
                             ],
                           },
-                          config: mode === 'expand' ? {
-                            imageConfig: { aspectRatio: targetAspectRatio as never }
-                          } : undefined
+                          config: {
+                            responseModalities: [Modality.TEXT, Modality.IMAGE],
+                            ...(mode === 'expand'
+                              ? { imageConfig: { aspectRatio: targetAspectRatio as never } }
+                              : {}),
+                          },
                         });
                         
                         const parts = response.candidates?.[0]?.content?.parts;

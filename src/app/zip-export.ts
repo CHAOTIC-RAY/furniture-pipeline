@@ -1,5 +1,7 @@
 import { zip } from 'fflate';
 
+export type ZipLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
 export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   const comma = dataUrl.indexOf(',');
   const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
@@ -11,13 +13,16 @@ export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   return out;
 }
 
-export function buildResultsZip(entries: { path: string; dataUrl: string }[]): Promise<Uint8Array> {
+export function buildResultsZip(
+  entries: { path: string; dataUrl: string }[],
+  level: ZipLevel = 6,
+): Promise<Uint8Array> {
   const zippable: Record<string, Uint8Array> = {};
   for (const e of entries) {
     zippable[`processed/${e.path}`] = dataUrlToUint8Array(e.dataUrl);
   }
   return new Promise((resolve, reject) => {
-    zip(zippable, { level: 6 }, (err, data) => {
+    zip(zippable, { level }, (err, data) => {
       if (err) {
         reject(err);
       } else {

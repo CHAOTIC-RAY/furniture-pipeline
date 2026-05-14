@@ -4,6 +4,18 @@ export interface OllamaChatResponse {
   message?: { content?: string };
 }
 
+function resolveChatUrl(baseUrl: string): string {
+  const root = (baseUrl || '/api/ollama').trim().replace(/\/$/, '');
+  if (/^https?:\/\//i.test(root)) {
+    return `${root}/api/chat`.replace(/([^:]\/)\/+/g, '$1');
+  }
+  const path = `${root.startsWith('/') ? '' : '/'}${root}/api/chat`.replace(/\/{2,}/g, '/');
+  if (typeof window === 'undefined' || !window.location?.origin) {
+    return path;
+  }
+  return new URL(path, window.location.origin).href;
+}
+
 @Injectable({ providedIn: 'root' })
 export class OllamaService {
   /**
@@ -15,8 +27,7 @@ export class OllamaService {
     baseUrl: string,
     model: string,
   ): Promise<string | null> {
-    const root = baseUrl.replace(/\/$/, '');
-    const url = `${root}/api/chat`;
+    const url = resolveChatUrl(baseUrl);
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
