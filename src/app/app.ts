@@ -402,6 +402,31 @@ interface ProcessingJob {
                  </div>
 
                  <div class="space-y-3">
+                    <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Gemini API key</h3>
+                    <p class="text-[8px] opacity-40 font-mono leading-relaxed">
+                      Paste a key from <span class="text-orange-500/80">Google AI Studio</span> to use Gemini here without rebuilding. Stored only in this browser’s <span class="text-orange-500/80">localStorage</span> (anyone with access to this device can read it).
+                    </p>
+                    @if (geminiApiKeyVault().length > 0) {
+                      <p class="text-[9px] font-mono text-emerald-500/90">A custom key is saved on this device.</p>
+                    }
+                    <input
+                      type="password"
+                      autocomplete="off"
+                      spellcheck="false"
+                      (change)="onGeminiApiKeyChange($event)"
+                      [placeholder]="geminiApiKeyVault().length ? 'Paste new key to replace…' : 'Paste API key (AIza…)'"
+                      class="w-full bg-black text-white border border-[#333333] px-2 py-2 text-[10px] font-mono">
+                    <button type="button" (click)="clearGeminiApiKey()" class="w-full border border-[#333333] text-[9px] uppercase font-bold tracking-widest py-2 hover:bg-red-500/10 text-red-400/90">
+                      Clear saved Gemini key
+                    </button>
+                    @if (!hasUsableGeminiKey() && engine() === 'cloud') {
+                      <p class="text-[9px] font-mono text-amber-500/90 leading-relaxed border border-amber-900/40 bg-amber-950/20 p-2">
+                        No valid Gemini key: set one here or build/serve with <span class="font-bold">GEMINI_API_KEY</span> (see <span class="font-bold">npm run dev</span> / angular.json define).
+                      </p>
+                    }
+                 </div>
+
+                 <div class="space-y-3">
                     <h3 class="text-[9px] uppercase tracking-widest opacity-40 font-bold block">Output Preferences</h3>
                     <div class="flex items-center justify-between p-3 border border-[#333333] bg-[#0a0a0a]">
                        <span class="text-[9px] uppercase font-bold tracking-widest">Default Background</span>
@@ -555,6 +580,17 @@ export class App implements OnInit {
     const h = window.location.hostname;
     return h.endsWith('.workers.dev') || h.endsWith('.pages.dev');
   });
+
+  /** User override from settings; never bind to template [value]. */
+  geminiApiKeyVault = signal<string>('');
+
+  hasUsableGeminiKey = computed(() => {
+    const k = this.resolveGeminiApiKey().trim();
+    if (!k) {
+      return false;
+    }
+    return k !== 'YOUR_GEMINI_API_KEY';
+  });
   
   activeJob = signal<ProcessingJob | null>(null);
   results = computed(() => this.activeJob()?.results || []);
@@ -592,6 +628,7 @@ export class App implements OnInit {
     tier: 'pipeline_local_model_tier',
     autoPreload: 'pipeline_auto_preload_imgly',
     zipPreset: 'pipeline_zip_level_preset',
+    geminiApiKey: 'pipeline_gemini_api_key',
   } as const;
 
   loadStoredSettings(): void {
@@ -624,6 +661,10 @@ export class App implements OnInit {
       if (zp === 'faster' || zp === 'smaller') {
         this.zipLevelPreset.set(zp);
       }
+      const gk = localStorage.getItem(this.ls.geminiApiKey);
+      if (gk) {
+        this.geminiApiKeyVault.set(gk);
+      }
     } catch {
       /* ignore */
     }
@@ -638,6 +679,12 @@ export class App implements OnInit {
       localStorage.setItem(this.ls.tier, this.localModelTier());
       localStorage.setItem(this.ls.autoPreload, this.autoPreloadImgly() ? '1' : '0');
       localStorage.setItem(this.ls.zipPreset, this.zipLevelPreset());
+      const gk = this.geminiApiKeyVault().trim();
+      if (gk) {
+        localStorage.setItem(this.ls.geminiApiKey, gk);
+      } else {
+        localStorage.removeItem(this.ls.geminiApiKey);
+      }
     } catch {
       /* ignore */
     }
@@ -687,6 +734,33 @@ export class App implements OnInit {
       this.zipLevelPreset.set(v);
       this.saveStoredSettings();
     }
+  }
+
+  onGeminiApiKeyChange(ev: Event): void {
+    const el = ev.target as HTMLInputElement;
+    const v = el.value.trim();
+    if (v) {
+      this.geminiApiKeyVault.set(v);
+      el.value = '';
+      this.saveStoredSettings();
+    }
+  }
+
+  clearGeminiApiKey(): void {
+    this.geminiApiKeyVault.set('');
+    try {
+      localStorage.removeItem(this.ls.geminiApiKey);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private resolveGeminiApiKey(): string {
+    const fromVault = this.geminiApiKeyVault().trim();
+    if (fromVault) {
+      return fromVault;
+    }
+    return GEMINI_API_KEY;
   }
 
   private imglyAssetBaseUrl(): string {
@@ -976,7 +1050,7 @@ export class App implements OnInit {
     
     this.activeJob.set(newJob);
     
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY }); 
+    const ai = new GoogleGenAI({ apiKey: this.resolveGeminiApiKey() });
     const mode = this.processType();
     
     for (const p of previews) {
